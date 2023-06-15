@@ -36,3 +36,6 @@ Upon trigger for either 10 seconds, or 20 if creature has not moved on, an incre
 louder noise and brighter strobes.  Then a 60 second lockout (single red LED).
 When it rearms, as well as the green single LED, another will indicate how many times
 it has been triggered since last power cycle (up to 63)
+
+# In Action
+https://youtube.com/shorts/f2WUhRsC7lQ?feature=share
