@@ -6,22 +6,21 @@
 # v1.01 8/5/23 first try using ultrasonic range finder and H-bridge to drive 
 # v2.01 1/6/23 new enclosure, + PIR sensor, + mWave sensor.  ditched ultrasonic
 # v2.02 15/6/23 using PlayLists for light and sound, added visual trigger count
+# v2.03 16/6/23 new interrupt driven sensor poll, retriggerable recovery state
 #
 ###############################################################################
 
-StartDelay = 60
-
 # Output to drive transistor pair for 12V 5W horn speaker (NOTE PWM inverted)
-from machine import Pin, PWM
+from machine import Pin, PWM, Timer
 Phorn = PWM(Pin(8, Pin.OUT))
 Phorn.freq(1000)
 Phorn.duty_u16(2**16 - 1)       # this NEEDS to be done ASAP
 
 # HC-SR501 PIR Motion Sensor, after (re)trig -> 2s high then 2s lockout
-Ppir = Pin(10, Pin.IN)
+Ppir = Pin(11, Pin.IN)
 
 # RCWL-0516 Microwave sensor, 1s high then appears to have a 5 sec lockout
-Pmwave = Pin(11, Pin.IN)
+Pmwave = Pin(10, Pin.IN)
 
 # GlowBit 8x8 Matrix of LEDs
 Pleds = Pin(13,Pin.OUT)
@@ -29,13 +28,14 @@ Pleds = Pin(13,Pin.OUT)
 from time import sleep_ms, ticks_ms
 from neopixel import NeoPixel as NP
 from math import log10
+import gc
 
 ###############################################################################
 # LIGHTS
 
 numPixels = 64
 LEDs = NP(Pleds, numPixels)
-'''
+''' Pixel Map
 00 01 02 03 04 05 06 07
 08 09 10 11 12 13 14 15
 16 17 18 19 20 21 22 23
@@ -81,7 +81,10 @@ def Strobe(R, G, B, Freq, Dur_ms):
 def Tone(Freq, Vol):
     # vol expected to be between 0 and 10
     # freq between 30 and 3000
-    # higher freq, greater power required, hence AdjVol formula
+    # higher freq, greater power required, hence AdjVol formula.  testing shows:
+    # @ 10Hz   PWM between 10 and 100  log10(10)=1 log10(100)=2           [1 ~ 2]
+    # @ 100Hz  PWM between 50 and 500  log10(50)=1.7 log10(500)=2.7       [2 ~ 3]
+    # @ 1kHz   PWM between 400 and 9000   log10(400)=2.6 log10(9000)=3.9  [3 ~ 4] 
     if Vol == 0:
         Phorn.duty_u16(2**16 - 1)
     else:
@@ -97,6 +100,14 @@ def Beep(Freq, Vol, Dur):
 
 def Play(I):
     Fstart, Fend, Vstart, Vend, R, G, B, StrobeFreq, Duration = I
+    # Blocking Play routine, pass tuple with
+    # Frequency start and end or same for no change (30 - 3000)
+    # Volume start and end or same (0 - 10)
+    # Frequency and Volume in either direction
+    # R, G, B values for strobe fill (0 - 255)
+    # Strobe frequency (< 50), dont expect accuracy
+    # duration of play in ms (10 - 1000) 
+    
     loopDelay = 10
     StrobeFlipCount = max(1, int(1000 / StrobeFreq / 2 / loopDelay))
 
@@ -104,14 +115,13 @@ def Play(I):
     freqStep = (Fend - Fstart) / numCycles
     volStep = (Vend - Vstart) / numCycles
 
-    #print(numCycles, freqStep, volStep, StrobeFlipCount)
     F, V = Fstart, Vstart 
     count = 1
-    ff = True
+    flip = True
 
     while count <= numCycles:
         Tone(F, V)
-        if ff:
+        if flip:
             Fill(R, G, B)
         else:
             Fill(0,0,0)
@@ -119,15 +129,16 @@ def Play(I):
         V += volStep
         count += 1
         if count % StrobeFlipCount == 0:
-            ff = not ff
+            flip = not flip
 
         sleep_ms(loopDelay)
 
     Tone(0,0)
     Fill(0,0,0)
 
-RampList = [(30, 30, 0, 5,       100, 100, 100,   20,      2000),
-            (100, 500, 2, 4,     100, 0, 0,       30,      1000),
+RampList = [(30, 30, 0, 2,       100, 100, 100,   20,      1000),
+            (30, 50, 2, 5,       100, 100, 100,   20,      1000),
+            (200, 100, 2, 4,     100, 0, 0,       30,      1000),
             (800, 300, 6, 2,     0, 100, 0,       10,       200),
             (100, 300, 2, 7,     0, 0, 100,       10,       200),
             (100, 300, 6, 2,     155, 155, 155,   50,       200),
@@ -148,8 +159,19 @@ BlastList = [(3000, 2000, 10, 5,   255,255,255,    50,      400),
 #for i in BlastList:  Play(i)  
 
 ###############################################################################
+# SENSOR reads
+# no luck getting reliable interrupts working, so instead poll based on 
+# 100ms interrupts to ensure a long Plays don't miss a sensor change
+
+def cbTimer(timer1):
+    global SensorDetect
+    SensorDetect = Ppir.value() or Pmwave.value()
+
+###############################################################################
 # INITIALISE
 # We need to wait for the sensors (30-60s) so lets do a fancy count down
+
+StartDelay = 60
 
 Fill(0,0,0)
 Border(0,10,0,0)
@@ -193,93 +215,99 @@ Fill(0,0,0)
 Tone(0,0)
 
 ###############################################################################
-# START main loop
+# START main state machine loop
+#
+# Init:   LED[0] = white   remain in this state until no sensor inputs 
+# Armed:  LED[0] = green   waiting for a SensorDetect trigger
+#                          in this mode, a LED between 1 and 63 will be blue
+#                          to indicate how many triggers have occured since 
+#                          last power cycle (up to 63)
+# Ramp:   flashing matrix  Ramp up the noise, playing list of sounds & strobes
+#                          monitor for retrigger and if so move to Blast 
+#                          after tRamp time. if no retigger move to Recovery
+# Blast   flashing matrix  Shock and awe hopefully, for period tBlast
+# Recover LED[0] = red     stay in this state for at least tRevover AFTER last 
+#                          DetectSensor event. solves problem of getting up 
+#                          at 3am for a stuck sensor.  if recovery was 
+#                          retriggered LED[7] = Red to indicate the problem
 
-tRamp = 10
-tBlast = 10
-tWait = 60
-tRetrig = 9    
+SensorDetect = False
+timer1 = Timer(period=100, callback=cbTimer)    # start periodic sensor reads
+sleep_ms(200)    # ensure first clean read prior to entering main state machine 
 
-def Pir():
-    return Ppir.value() == 1
-
-def Mwave():
-    return Pmwave.value() == 1
+tRamp = 10      # ramp time (s), if playlist is too short (in time) repeat last
+tBlast = 10     # Blast Time
+tRevover = 60   # lockout recovery time
 
 State = 'Init'
-lState = 'blaa'
-TrigTime = 0
-trig = False
+lState = ''
+
 TrigCount = 1
 
 while True:   
-
     if State != lState:
         lState = State
         print(State)
 
-    if Pir() or Mwave():
-        trig = True
-        TrigTime = ticks_ms()
-
     if State == 'Init':
         LEDs[0] = ((10,10,10))
         NP.write(LEDs)
-        
-        if not (Pir() or Mwave()):
-            trig = False
+        if not SensorDetect:
             State = 'Armed'
-
-    elif State == 'Armed':
+    
+    elif State == 'Armed':   
         LEDs[0] = ((0,10,0))
-        LEDs[TrigCount] = ((10,10,0))
+        LEDs[TrigCount] = ((0,0,20))
         NP.write(LEDs)
 
-        if trig:
+        if SensorDetect:
             State = 'Ramp'
             TrigCount = min(63, TrigCount + 1)
             RampCount = 0
             StateTime = ticks_ms()
+            ReArmed = False
+            BlastEnable = False
 
     elif State == 'Ramp':
         Play(RampList[RampCount])
         RampCount = min(len(RampList) - 1, RampCount + 1)
 
-        if TrigTime + (1000 * tRetrig) < ticks_ms():
-            Tone(0,0)
-            State = 'Recover'
-        if StateTime + (1000 * tRamp) < ticks_ms():
-            State = 'Blast'
-            BlastCount = 0
-            StateTime = ticks_ms()
+        if not SensorDetect: 
+            ReArmed = True
+        if ReArmed and SensorDetect: 
+            BlastEnable = True
+
+        if StateTime + (1000 * tRamp) < ticks_ms():  
+            if BlastEnable or SensorDetect:
+                State = 'Blast'
+                BlastCount = 0
+                StateTime = ticks_ms()
+            else:
+                Tone(0,0)
+                StateTime = ticks_ms()
+                State = 'Recover'
 
     elif State == 'Blast':
+
         Play(BlastList[BlastCount])
         BlastCount = min(len(BlastList) - 1, BlastCount + 1)
 
-        if TrigTime + (1000 * tRetrig) < ticks_ms():
-            Tone(0,0)
-            State = 'Recover'
         if StateTime + (1000 * tBlast) < ticks_ms():
             Tone(0,0)
             StateTime = ticks_ms()
             State = 'Recover'
 
     elif State == 'Recover':
-        Fill(0,0,0)
-        LEDs[0] = ((0,0,20))
-        NP.write(LEDs)
-
-        if not(Pir() or Mwave()):
-            StateTime = ticks_ms()
-            State = 'Wait'
-
-    elif State == 'Wait':
         LEDs[0] = ((20,0,0))
         NP.write(LEDs)
-        if StateTime + (1000 * tWait) < ticks_ms():
-            trig = False
+        if StateTime + (1000 * tRevover) < ticks_ms():
             State = 'Armed'
+            LEDs[7] = ((0,0,0))
+        if SensorDetect:                # reset timet if detect in wait period
+            StateTime = ticks_ms()
+            LEDs[7] = ((20,0,0))
+            NP.write(LEDs)
 
-    #if State != 'Ramp' and State != 'Blast': sleep_ms(100)
-    sleep_ms(10)
+    if State != 'Ramp' and State != 'Blast': sleep_ms(50)
+    gc.collect()
+
