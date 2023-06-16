@@ -11,7 +11,7 @@ detects presence using PIR and Microwave sensors
 triggers a two stage sound and light show to scare off ducks
 uses 12V 5W horn speaker and 8x8 matrix of LEDs to strobe
 
-# Parts:
+# Parts
 RP2040 Pico board (or anything that runs Micropyhton
 GlowBit 8x8 Matrix of LEDs
 RCWL-0516 Microwave sensor
@@ -23,7 +23,7 @@ IRF610 FET (or whatever is lying around)
 12V -> 3.3V 2A stepdown 
 Power source (On standby expect 35mA, but pushing 2A when triggered) 
 
-# 3D Printing:
+# 3D Printing
 Design files in FreeCAD format
 Models in step format
 Traslucent PETG used for front- pay particular attention to first layer.
