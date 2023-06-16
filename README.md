@@ -28,6 +28,7 @@ Design files in FreeCAD format
 Models in step format
 Traslucent PETG used for front- pay particular attention to first layer.
    It must only be one layer thick, but also use 150% flow, otherwise not as watertight
+I used the horn bracket to mount as it already allows for angle adjustments
 
 # Usage
 After powering on move away and avoid changes for 60 seconds whilst sensors initialise.
