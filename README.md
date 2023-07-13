@@ -9,7 +9,10 @@ Scares ducks off my jetty when they get too close so I don't have to cleanup end
 
 ## How does it work?  
 It detects presence using PIR and microwave sensors which triggers a two stage sound and light show.
-It uses a 12V 5W horn speaker and 8x8 matrix of LEDs to strobe
+It uses a 12V 5W horn speaker and 8x8 matrix of LEDs to strobe.
+
+## Build Instructions
+https://core-electronics.com.au/projects/duck-off-duck-repellent-device/
 
 ## Parts
 - RP2040 Pico board (or anything that runs Micropyhton
